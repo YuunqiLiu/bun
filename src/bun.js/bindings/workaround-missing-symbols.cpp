@@ -68,6 +68,9 @@ extern "C" int kill(int pid, int sig)
 #include <stdio.h>
 #include <signal.h>
 #include <sys/random.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#include <stdlib.h>
 #include <dlfcn.h>
 
 #ifndef _STAT_VER
@@ -225,6 +228,31 @@ extern "C" int __wrap_fcntl64(int fd, int cmd, ...)
 
 extern "C" __attribute__((used)) char _libc_single_threaded = 0;
 extern "C" __attribute__((used)) char __libc_single_threaded = 0;
+
+// --- GLIBC ≤2.17 compatibility workarounds ---
+// These wrappers allow the binary to run on systems with glibc 2.17 (CentOS 7)
+// by providing fallback implementations for functions introduced in newer glibc.
+
+// getrandom() was added in GLIBC_2.25, but the underlying syscall (SYS_getrandom)
+// has been available since Linux 3.17. Use the syscall directly.
+extern "C" ssize_t __wrap_getrandom(void *buf, size_t buflen, unsigned int flags) {
+    return syscall(SYS_getrandom, buf, buflen, flags);
+}
+
+// quick_exit() was added in GLIBC_2.24. Fall back to _exit() which skips
+// at_quick_exit handlers but is safe for our use case.
+extern "C" void __wrap_quick_exit(int status) {
+    _exit(status);
+}
+
+// __cxa_thread_atexit_impl() was added in GLIBC_2.18. It registers destructors
+// for thread-local objects. Fall back to __cxa_atexit() (process-level) which
+// is available in all glibc versions. This means thread-local destructors
+// become process-level destructors — acceptable for the Bun runtime.
+extern "C" int __wrap___cxa_thread_atexit_impl(void (*dtor)(void *), void *obj, void *dso_symbol) {
+    extern int __cxa_atexit(void (*)(void *), void *, void *);
+    return __cxa_atexit(dtor, obj, dso_symbol);
+}
 
 #endif // glibc
 

@@ -1039,6 +1039,7 @@ if(NOT WIN32)
       -Wno-c++23-lambda-attributes
       -Wno-nullability-completeness
       -Wno-character-conversion
+      -Wno-undefined-var-template
       -Werror
     )
 
@@ -1142,6 +1143,9 @@ if(LINUX)
     -Wl,--wrap=logf
     -Wl,--wrap=pow
     -Wl,--wrap=powf
+    -Wl,--wrap=getrandom
+    -Wl,--wrap=quick_exit
+    -Wl,--wrap=__cxa_thread_atexit_impl
   )
 
   # Disable LTO for workaround-missing-symbols.cpp to prevent LLD 21 from emitting

@@ -1,0 +1,103 @@
+# Toolchain base image - build once and reuse for iterative Bun builds
+# Based on .buildkite/Dockerfile, adapted for Podman (x86_64 only)
+
+ARG LLVM_VERSION="21"
+
+FROM ubuntu:20.04 AS base
+
+ARG LLVM_VERSION
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    CI=true \
+    DOCKER=true \
+    http_proxy="" \
+    https_proxy="" \
+    HTTP_PROXY="" \
+    HTTPS_PROXY=""
+
+RUN echo "Acquire::Queue-Mode \"host\";" > /etc/apt/apt.conf.d/99-apt-queue-mode.conf \
+    && echo "Acquire::Timeout \"120\";" >> /etc/apt/apt.conf.d/99-apt-timeout.conf \
+    && echo "Acquire::Retries \"3\";" >> /etc/apt/apt.conf.d/99-apt-retries.conf \
+    && echo "APT::Install-Recommends \"false\";" >> /etc/apt/apt.conf.d/99-apt-install-recommends.conf \
+    && echo "APT::Install-Suggests \"false\";" >> /etc/apt/apt.conf.d/99-apt-install-suggests.conf
+
+# Install system packages, GCC 13, LLVM 21
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget curl git python3 python3-pip ninja-build \
+    software-properties-common apt-transport-https \
+    ca-certificates gnupg lsb-release unzip \
+    libxml2-dev ruby ruby-dev bison gawk perl make golang ccache \
+    && add-apt-repository ppa:ubuntu-toolchain-r/test \
+    && apt-get update \
+    && apt-get install -y gcc-13 g++-13 libgcc-13-dev libstdc++-13-dev \
+        libasan6 libubsan1 libatomic1 libtsan0 liblsan0 \
+        libgfortran5 libc6-dev \
+    && wget https://apt.llvm.org/llvm.sh \
+    && chmod +x llvm.sh \
+    && ./llvm.sh ${LLVM_VERSION} all \
+    && rm llvm.sh \
+    && rm -rf /var/lib/apt/lists/*
+
+# CMake 3.30.5
+RUN cmake_version="3.30.5" && \
+    wget -O /tmp/cmake.sh "https://github.com/Kitware/CMake/releases/download/v${cmake_version}/cmake-${cmake_version}-linux-x86_64.sh" && \
+    sh /tmp/cmake.sh --skip-license --prefix=/usr && \
+    rm /tmp/cmake.sh
+
+# GCC 13 as default
+RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 130 \
+    --slave /usr/bin/g++ g++ /usr/bin/g++-13 \
+    --slave /usr/bin/gcc-ar gcc-ar /usr/bin/gcc-ar-13 \
+    --slave /usr/bin/gcc-nm gcc-nm /usr/bin/gcc-nm-13 \
+    --slave /usr/bin/gcc-ranlib gcc-ranlib /usr/bin/gcc-ranlib-13
+
+# Library paths for x86_64  
+# Note: Do NOT set C_INCLUDE_PATH to GCC's intrinsics dir - it conflicts with clang's
+# own mmintrin.h/emmintrin.h. The original Dockerfile accidentally avoids this because
+# ${ARCH_PATH} is unresolved in its ENV directive.
+ENV LD_LIBRARY_PATH=/usr/lib/gcc/x86_64-linux-gnu/13:/usr/lib/x86_64-linux-gnu \
+    LIBRARY_PATH=/usr/lib/gcc/x86_64-linux-gnu/13:/usr/lib/x86_64-linux-gnu \
+    CPLUS_INCLUDE_PATH=/usr/include/c++/13:/usr/include/x86_64-linux-gnu/c++/13
+
+RUN mkdir -p /usr/lib/gcc/x86_64-linux-gnu/13 \
+    && ln -sf /usr/lib/x86_64-linux-gnu/libstdc++.so.6 /usr/lib/gcc/x86_64-linux-gnu/13/ \
+    && echo "/usr/lib/gcc/x86_64-linux-gnu/13" > /etc/ld.so.conf.d/gcc-13.conf \
+    && echo "/usr/lib/x86_64-linux-gnu" >> /etc/ld.so.conf.d/gcc-13.conf \
+    && ldconfig
+
+# LLVM symlinks
+RUN for f in /usr/lib/llvm-${LLVM_VERSION}/bin/*; do ln -sf "$f" /usr/bin; done \
+    && ln -sf /usr/bin/clang-${LLVM_VERSION} /usr/bin/clang \
+    && ln -sf /usr/bin/clang++-${LLVM_VERSION} /usr/bin/clang++ \
+    && ln -sf /usr/bin/lld-${LLVM_VERSION} /usr/bin/lld \
+    && ln -sf /usr/bin/lldb-${LLVM_VERSION} /usr/bin/lldb \
+    && ln -sf /usr/bin/clangd-${LLVM_VERSION} /usr/bin/clangd \
+    && ln -sf /usr/bin/llvm-ar-${LLVM_VERSION} /usr/bin/llvm-ar \
+    && ln -sf /usr/bin/ld.lld /usr/bin/ld \
+    && ln -sf /usr/bin/clang /usr/bin/cc \
+    && ln -sf /usr/bin/clang++ /usr/bin/c++
+
+ENV CC="clang" \
+    CXX="clang++" \
+    AR="llvm-ar" \
+    RANLIB="llvm-ranlib" \
+    LD="lld"
+
+# Install Bun 1.2.15 (bootstrap compiler for build scripts)
+# Pre-downloaded to avoid CDN flakiness
+COPY bun-bootstrap.zip /tmp/bun.zip
+RUN unzip /tmp/bun.zip -d /tmp/bun && \
+    mv /tmp/bun/*/bun /usr/bin/bun && \
+    chmod +x /usr/bin/bun && \
+    rm -rf /tmp/bun /tmp/bun.zip
+
+# Install Rust nightly
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+    && export PATH=$HOME/.cargo/bin:$PATH \
+    && rustup install nightly \
+    && rustup default nightly
+
+ENV PATH=/root/.cargo/bin:$PATH
+ENV LLVM_VERSION="21.1.8"
+
+WORKDIR /workspace
