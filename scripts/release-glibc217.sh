@@ -187,24 +187,35 @@ ok "Tag pushed: $NEXT_VERSION"
 # ---------- create GitHub release ----------
 
 info "Creating GitHub release $NEXT_VERSION ..."
-RELEASE_RESPONSE=$(api_post \
-    "https://api.github.com/repos/${REPO}/releases" \
-    --data "$(python3 -c "
+# Build the JSON payload and call the API; save response to temp file
+TMP_RESP=$(mktemp)
+TMP_PAYLOAD=$(mktemp)
+python3 - <<PYEOF > "$TMP_PAYLOAD"
 import json, sys
-print(json.dumps({
+payload = {
     'tag_name': '${NEXT_VERSION}',
     'target_commitish': '${COMMIT_SHA}',
     'name': 'Bun ${UPSTREAM_BUN_VERSION} GLIBC-2.17 compat ${NEXT_VERSION}',
-    'body': sys.stdin.read(),
+    'body': """${RELEASE_NOTES}""",
     'draft': False,
     'prerelease': False
-}))
-" <<< "$RELEASE_NOTES")")
+}
+print(json.dumps(payload))
+PYEOF
+curl -fsSL \
+    -X POST \
+    -H "Authorization: token ${GITHUB_TOKEN}" \
+    -H "Accept: application/vnd.github.v3+json" \
+    -H "Content-Type: application/json" \
+    --data @"$TMP_PAYLOAD" \
+    "https://api.github.com/repos/${REPO}/releases" > "$TMP_RESP"
+rm -f "$TMP_PAYLOAD"
 
-RELEASE_ID=$(python3 -c "import sys,json; print(json.loads('''${RELEASE_RESPONSE}''').get('id',''))" 2>/dev/null || echo "")
-RELEASE_URL=$(python3 -c "import sys,json; print(json.loads('''${RELEASE_RESPONSE}''').get('html_url',''))" 2>/dev/null || echo "")
+RELEASE_ID=$(python3 -c "import json; d=json.load(open('$TMP_RESP')); print(d.get('id',''))" 2>/dev/null || echo "")
+RELEASE_URL=$(python3 -c "import json; d=json.load(open('$TMP_RESP')); print(d.get('html_url',''))" 2>/dev/null || echo "")
+rm -f "$TMP_RESP"
 
-[[ -n "$RELEASE_ID" ]] || err "Failed to create release. Response: $RELEASE_RESPONSE"
+[[ -n "$RELEASE_ID" ]] || err "Failed to create release (no id in response)"
 ok "Release created: $RELEASE_URL (id=$RELEASE_ID)"
 
 # ---------- upload binary ----------
@@ -212,15 +223,17 @@ ok "Release created: $RELEASE_URL (id=$RELEASE_ID)"
 info "Uploading binary ($(ls -lh $BINARY | awk '{print $5}')) ..."
 UPLOAD_URL="https://uploads.github.com/repos/${REPO}/releases/${RELEASE_ID}/assets?name=bun-linux-x64"
 
-UPLOAD_RESPONSE=$(curl -fsSL \
+TMP_UPLOAD=$(mktemp)
+curl -fsSL \
     -X POST \
     -H "Authorization: token ${GITHUB_TOKEN}" \
     -H "Content-Type: application/octet-stream" \
     --data-binary "@${BINARY}" \
-    "$UPLOAD_URL")
+    "$UPLOAD_URL" > "$TMP_UPLOAD"
 
-ASSET_URL=$(python3 -c "import sys,json; print(json.loads('${UPLOAD_RESPONSE}').get('browser_download_url',''))" 2>/dev/null || echo "")
-[[ -n "$ASSET_URL" ]] || err "Failed to upload asset. Response: $UPLOAD_RESPONSE"
+ASSET_URL=$(python3 -c "import json; d=json.load(open('$TMP_UPLOAD')); print(d.get('browser_download_url',''))" 2>/dev/null || echo "")
+rm -f "$TMP_UPLOAD"
+[[ -n "$ASSET_URL" ]] || err "Failed to upload asset"
 ok "Binary uploaded: $ASSET_URL"
 
 # ---------- done ----------
